@@ -3,33 +3,46 @@ import GameplayKit
 import UIKit
 
 // =====================================================================
-//  RUN FROM JIGAR — polished edition
+//  RUN FROM JIGAR — polished edition, v4
 // =====================================================================
-//  This file no longer depends on external art assets at all.
-//  Every sprite (player, Jigar, RAM, power-ups, background) is drawn
-//  in code with Core Graphics and turned into a crisp SKTexture.
-//  That means the game looks finished immediately — no missing-image
-//  placeholders, no trip to Assets.xcassets required — while still
-//  automatically using a named asset (e.g. "playerSprite") if you
-//  drop one into Assets.xcassets later.
+//  New in this version (design notes / assumptions called out since
+//  the request was a little ambiguous — see the chat reply for these):
 //
-//  Sections are labelled and commented so the flow is easy to follow
-//  even if you're new to SpriteKit.
+//   • TOUCHING Jigar directly is now instant death, separate from the
+//     old "distance" mechanic. Jigar has a real physics body now.
+//   • Jigar is redesigned to look like a virus: a round cell body
+//     covered in spike proteins, in sickly toxic tones.
+//   • The old horizontal "JIGAR 260m" bar is replaced by a VERTICAL
+//     "Jigar Health" bar, top-right, scaled 0–100. Reading it as your
+//     remaining safety margin: 100 = fully safe, 0 = caught.
+//   • Jigar's ranged shots no longer instant-kill on hit. Instead each
+//     hit chips a random 4–15 off that Health bar (dodging is still
+//     the correct play — direct contact is still instant death).
+//     A Shield power-up blocks both ranged chip damage and a direct
+//     touch.
+//
+//  Everything else (procedural art for player/RAM, menu, Garage,
+//  particles, screen shake, pause, combo counter, power-ups) is
+//  unchanged from v3.
 // =====================================================================
 
 // MARK: - Collision Categories
 
 struct PhysicsCategory {
-    static let none: UInt32     = 0
-    static let player: UInt32   = 0b1
-    static let ram: UInt32      = 0b10
-    static let powerUp: UInt32  = 0b100
+    static let none: UInt32       = 0
+    static let player: UInt32     = 0b1
+    static let ram: UInt32        = 0b10
+    static let powerUp: UInt32    = 0b100
+    static let projectile: UInt32 = 0b1000
+    static let jigarBody: UInt32  = 0b10000
 }
 
 // MARK: - Game States
 
 enum GameState {
+    case menu
     case tutorial
+    case garage
     case playing
     case paused
     case gameOver
@@ -74,8 +87,6 @@ enum PowerUp: CaseIterable {
         }
     }
 
-    /// Simple SF Symbol style glyph drawn by hand, used for the icon
-    /// inside the power-up's procedurally drawn badge.
     var glyph: String {
         switch self {
         case .speedBoost:  return "⚡"
@@ -97,6 +108,92 @@ enum PowerUp: CaseIterable {
     }
 }
 
+// MARK: - Cosmetic Skins (unlocked/bought with banked RAM)
+
+struct SkinOption {
+    let id: String
+    let name: String
+    let color: UIColor
+    let cost: Int
+}
+
+let playerSkins: [SkinOption] = [
+    SkinOption(id: "default", name: "CYAN RUNNER", color: UIColor(red: 0.35, green: 0.95, blue: 1.0, alpha: 1), cost: 0),
+    SkinOption(id: "gold",    name: "GOLD RUNNER",  color: UIColor(red: 1.0, green: 0.85, blue: 0.25, alpha: 1), cost: 150),
+    SkinOption(id: "magenta", name: "NEON PINK",    color: UIColor(red: 1.0, green: 0.25, blue: 0.75, alpha: 1), cost: 150),
+    SkinOption(id: "emerald", name: "EMERALD",      color: UIColor(red: 0.25, green: 1.0, blue: 0.55, alpha: 1), cost: 250),
+    SkinOption(id: "ghost",   name: "GHOST WHITE",  color: UIColor(white: 0.95, alpha: 1), cost: 350)
+]
+
+let jigarSkins: [SkinOption] = [
+    SkinOption(id: "default", name: "CRIMSON VIRUS", color: UIColor(red: 0.85, green: 0.15, blue: 0.2, alpha: 1), cost: 0),
+    SkinOption(id: "toxic",   name: "TOXIC VIRUS",    color: UIColor(red: 0.35, green: 0.95, blue: 0.25, alpha: 1), cost: 200),
+    SkinOption(id: "shadow",  name: "SHADOW VIRUS",   color: UIColor(white: 0.25, alpha: 1), cost: 200),
+    SkinOption(id: "royal",   name: "ROYAL VIRUS",    color: UIColor(red: 0.55, green: 0.25, blue: 1.0, alpha: 1), cost: 350)
+]
+
+// MARK: - Persistent Meta Progress
+
+final class MetaProgress {
+
+    static let shared = MetaProgress()
+    private let defaults = UserDefaults.standard
+
+    private enum Keys {
+        static let totalRAM = "TotalRAMBanked"
+        static let unlockedPlayerSkins = "UnlockedPlayerSkins"
+        static let unlockedJigarSkins = "UnlockedJigarSkins"
+        static let equippedPlayerSkin = "EquippedPlayerSkin"
+        static let equippedJigarSkin = "EquippedJigarSkin"
+        static let highScore = "HighScoreRAM"
+    }
+
+    var totalRAM: Int {
+        get { defaults.integer(forKey: Keys.totalRAM) }
+        set { defaults.set(max(0, newValue), forKey: Keys.totalRAM) }
+    }
+
+    var level: Int { totalRAM / 100 + 1 }
+    var levelProgress: CGFloat { CGFloat(totalRAM % 100) / 100.0 }
+
+    var bestRun: Int {
+        get { defaults.integer(forKey: Keys.highScore) }
+        set { defaults.set(newValue, forKey: Keys.highScore) }
+    }
+
+    var unlockedPlayerSkins: Set<String> {
+        get { Set(defaults.stringArray(forKey: Keys.unlockedPlayerSkins) ?? ["default"]) }
+        set { defaults.set(Array(newValue), forKey: Keys.unlockedPlayerSkins) }
+    }
+
+    var unlockedJigarSkins: Set<String> {
+        get { Set(defaults.stringArray(forKey: Keys.unlockedJigarSkins) ?? ["default"]) }
+        set { defaults.set(Array(newValue), forKey: Keys.unlockedJigarSkins) }
+    }
+
+    var equippedPlayerSkin: String {
+        get { defaults.string(forKey: Keys.equippedPlayerSkin) ?? "default" }
+        set { defaults.set(newValue, forKey: Keys.equippedPlayerSkin) }
+    }
+
+    var equippedJigarSkin: String {
+        get { defaults.string(forKey: Keys.equippedJigarSkin) ?? "default" }
+        set { defaults.set(newValue, forKey: Keys.equippedJigarSkin) }
+    }
+
+    func unlockPlayerSkin(_ id: String) {
+        var set = unlockedPlayerSkins
+        set.insert(id)
+        unlockedPlayerSkins = set
+    }
+
+    func unlockJigarSkin(_ id: String) {
+        var set = unlockedJigarSkins
+        set.insert(id)
+        unlockedJigarSkins = set
+    }
+}
+
 // MARK: - Game Scene
 
 class GameScene: SKScene, SKPhysicsContactDelegate {
@@ -113,18 +210,21 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private var jigarGlow: SKSpriteNode!
 
     private var backgroundNode: SKNode!
-    private var worldNode: SKNode!          // everything that shakes together
-    private var uiNode: SKNode!             // HUD, never shakes
+    private var worldNode: SKNode!
+    private var uiNode: SKNode!
 
-    // MARK: UI
+    // MARK: HUD (in-run)
 
     private var ramLabel: SKLabelNode!
     private var ramProgressBar: SKShapeNode!
     private var ramProgressFill: SKShapeNode!
 
-    private var jigarDistanceLabel: SKLabelNode!
-    private var jigarProximityBar: SKShapeNode!
-    private var jigarProximityFill: SKShapeNode!
+    // Vertical "Jigar Health" bar, top-right, 0-100.
+    private var jigarHealthTitle: SKLabelNode!
+    private var jigarHealthBarBack: SKShapeNode!
+    private var jigarHealthBarFill: SKShapeNode!
+    private var jigarHealthValueLabel: SKLabelNode!
+    private let jigarHealthBarHeight: CGFloat = 120
 
     private var comboLabel: SKLabelNode!
 
@@ -134,26 +234,32 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
     private var pauseButton: SKShapeNode!
 
+    // MARK: Screens
+
+    private var menuNode: SKNode!
+    private var garageNode: SKNode!
     private var tutorialNode: SKNode!
     private var gameOverNode: SKNode!
     private var pauseNode: SKNode!
 
     // MARK: Game State
 
-    private var gameState: GameState = .tutorial
-    private var stateBeforePause: GameState = .tutorial
+    private var gameState: GameState = .menu
 
     private var ramCount = 0
     private var ramNeededForPowerUp = 10
     private var comboCount = 0
     private var lastCollectTime: TimeInterval = 0
 
-    private var highScore = 0
+    // MARK: Jigar Health (0...100 — your remaining safety margin)
 
-    // MARK: Jigar
+    private var jigarHealth: CGFloat = 100
+    private let startingJigarHealth: CGFloat = 100
+    /// How far (in points) Jigar visually sits behind the player at
+    /// full health. Purely cosmetic — derived from jigarHealth. Scaled
+    /// up for larger screens in didMove — see contentScale below.
+    private var maxVisualGap: CGFloat = 260
 
-    private var jigarDistance: CGFloat = 260
-    private let startingJigarDistance: CGFloat = 260
     private var jigarFrozen = false
     private var jigarShielded = false
 
@@ -164,8 +270,20 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
     // MARK: Movement
 
-    private let lanes: [CGFloat] = [-100, 0, 100]
+    /// Lane x-positions and the player/Jigar's base y-position. These
+    /// start with iPhone-sized defaults but are recomputed in didMove
+    /// once the actual scene size is known, so the 3 lanes stretch
+    /// across the whole width on a bigger screen (iPad/macOS) instead
+    /// of sitting in a fixed narrow strip in the middle.
+    private var lanes: [CGFloat] = [-100, 0, 100]
     private var currentLane = 1
+    private var playerBaseY: CGFloat = -170
+
+    /// Scale applied to every gameplay sprite (player, Jigar, RAM,
+    /// projectiles, glows) so they enlarge to match bigger screens
+    /// instead of staying iPhone-sized and looking tiny. 1.0 on a
+    /// ~375pt-wide iPhone; grows from there.
+    private var contentScale: CGFloat = 1.0
 
     // MARK: Game Speed
 
@@ -175,9 +293,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
     private var ramNodes: [SKNode] = []
 
-    // MARK: Sprite Names (optional — drop matching images into
-    // Assets.xcassets and they will be used automatically instead
-    // of the built-in procedural artwork)
+    // MARK: Sprite Names (optional external assets)
 
     private enum SpriteName {
         static let player = "playerSprite"
@@ -196,7 +312,18 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         physicsWorld.gravity = CGVector(dx: 0, dy: 0)
         physicsWorld.contactDelegate = self
 
-        highScore = UserDefaults.standard.integer(forKey: "HighScoreRAM")
+        // --- Scale gameplay for the actual screen size ---
+        // On an iPhone-width scene this reproduces the original
+        // layout (lanes ~100pt apart, scale 1.0). On a wider iPad or
+        // macOS window, the 3 lanes spread out to cover most of the
+        // width instead of a fixed narrow strip, and every gameplay
+        // sprite scales up to match, instead of looking small and
+        // stranded in the middle of a big screen.
+        let laneSpan = size.width * 0.32
+        lanes = [-laneSpan, 0, laneSpan]
+        contentScale = min(max(size.width / 375.0, 1.0), 2.4)
+        maxVisualGap = 260 * contentScale
+        playerBaseY = -170 * contentScale
 
         worldNode = SKNode()
         addChild(worldNode)
@@ -209,13 +336,23 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         setupPlayer()
         setupJigar()
         setupUI()
+
+        menuNode = SKNode()
+        menuNode.zPosition = 210
+        uiNode.addChild(menuNode)
+
+        garageNode = SKNode()
+        garageNode.zPosition = 210
+        uiNode.addChild(garageNode)
+
         setupTutorial()
         setupGameOver()
         setupPauseOverlay()
         setupSwipeControls(view: view)
         setupTapControls(view: view)
 
-        changeState(to: .tutorial)
+        applyEquippedSkins()
+        changeState(to: .menu)
     }
 
     // =================================================================
@@ -225,36 +362,53 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private func changeState(to newState: GameState) {
         gameState = newState
 
+        menuNode.isHidden = true
+        garageNode.isHidden = true
+        tutorialNode.isHidden = true
+        gameOverNode.isHidden = true
+        pauseNode.isHidden = true
+
         switch newState {
 
-        case .tutorial:
-            tutorialNode.isHidden = false
-            gameOverNode.isHidden = true
-            pauseNode.isHidden = true
+        case .menu:
+            buildMenuContent()
+            menuNode.isHidden = false
 
             player.isHidden = true
             jigar.isHidden = true
-
             ramLabel.isHidden = true
             ramProgressBar.isHidden = true
-            jigarDistanceLabel.isHidden = true
-            jigarProximityBar.isHidden = true
+            jigarHealthTitle.isHidden = true
+            jigarHealthBarBack.isHidden = true
+            jigarHealthBarFill.isHidden = true
+            jigarHealthValueLabel.isHidden = true
             powerUpBadge.isHidden = true
             pauseButton.isHidden = true
             comboLabel.isHidden = true
 
-        case .playing:
-            tutorialNode.isHidden = true
-            gameOverNode.isHidden = true
-            pauseNode.isHidden = true
+        case .garage:
+            buildGarageContent()
+            garageNode.isHidden = false
 
+            player.isHidden = true
+            jigar.isHidden = true
+
+        case .tutorial:
+            tutorialNode.isHidden = false
+
+            player.isHidden = true
+            jigar.isHidden = true
+
+        case .playing:
             player.isHidden = false
             jigar.isHidden = false
 
             ramLabel.isHidden = false
             ramProgressBar.isHidden = false
-            jigarDistanceLabel.isHidden = false
-            jigarProximityBar.isHidden = false
+            jigarHealthTitle.isHidden = false
+            jigarHealthBarBack.isHidden = false
+            jigarHealthBarFill.isHidden = false
+            jigarHealthValueLabel.isHidden = false
             pauseButton.isHidden = false
 
             resetGame()
@@ -265,13 +419,17 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             worldNode.isPaused = true
 
         case .gameOver:
-            tutorialNode.isHidden = true
             gameOverNode.isHidden = false
-            pauseNode.isHidden = true
 
             player.isHidden = false
             jigar.isHidden = false
 
+            ramLabel.isHidden = true
+            ramProgressBar.isHidden = true
+            jigarHealthTitle.isHidden = true
+            jigarHealthBarBack.isHidden = true
+            jigarHealthBarFill.isHidden = true
+            jigarHealthValueLabel.isHidden = true
             powerUpBadge.isHidden = true
             pauseButton.isHidden = true
             comboLabel.isHidden = true
@@ -284,9 +442,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     // MARK: - Procedural Art Helpers
     // =================================================================
 
-    /// Renders a soft radial-glow circle texture — used behind the
-    /// player and Jigar to give them a neon "alive" feel with zero
-    /// external art.
     private func glowTexture(color: UIColor, diameter: CGFloat) -> SKTexture {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: diameter, height: diameter))
         let image = renderer.image { ctx in
@@ -305,8 +460,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         return SKTexture(image: image)
     }
 
-    /// Draws the runner: a rounded, forward-leaning capsule body with
-    /// a bright visor stripe — instantly reads as "a person running".
     private func playerTexture() -> SKTexture {
         let size = CGSize(width: 64, height: 64)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -326,12 +479,10 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
                                       options: [])
             cgCtx.restoreGState()
 
-            // Visor stripe — reads as "face/front".
             let visor = UIBezierPath(roundedRect: CGRect(x: 20, y: 38, width: 24, height: 8), cornerRadius: 4)
             UIColor.white.withAlphaComponent(0.9).setFill()
             visor.fill()
 
-            // Outline for readability against any background.
             UIColor.white.withAlphaComponent(0.5).setStroke()
             bodyPath.lineWidth = 2
             bodyPath.stroke()
@@ -339,59 +490,89 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         return SKTexture(image: image)
     }
 
-    /// Draws Jigar: a spiky, menacing dark blob with glowing red eyes
-    /// — reads clearly as "the threat chasing you".
+    /// Jigar redrawn as a virus: a round "cell body" ringed with
+    /// club-headed spike proteins (the classic virus-icon silhouette),
+    /// with the same glowing red eyes so the character stays readable
+    /// as "the thing chasing me" rather than a generic germ.
     private func jigarTexture() -> SKTexture {
-        let size = CGSize(width: 80, height: 80)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let canvasSize = CGSize(width: 96, height: 96)
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
         let image = renderer.image { ctx in
             let cgCtx = ctx.cgContext
-            let center = CGPoint(x: size.width / 2, y: size.height / 2 - 6)
+            let center = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
+            let bodyRadius: CGFloat = 26
+            let spikeCount = 12
+            let spikeLength: CGFloat = 10
+            let spikeHeadRadius: CGFloat = 5
 
-            // Spiky silhouette.
-            let spikes = 10
-            let outerRadius: CGFloat = 34
-            let innerRadius: CGFloat = 22
-            let path = UIBezierPath()
-            for i in 0..<(spikes * 2) {
-                let angle = (CGFloat(i) / CGFloat(spikes * 2)) * .pi * 2
-                let radius = i % 2 == 0 ? outerRadius : innerRadius
-                let point = CGPoint(x: center.x + cos(angle) * radius,
-                                     y: center.y + sin(angle) * radius)
-                if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            // Spike proteins first (drawn behind the body so the body
+            // edge covers the base of each stalk cleanly).
+            for i in 0..<spikeCount {
+                let angle = (CGFloat(i) / CGFloat(spikeCount)) * .pi * 2
+                let baseX = center.x + cos(angle) * bodyRadius
+                let baseY = center.y + sin(angle) * bodyRadius
+                let tipX = center.x + cos(angle) * (bodyRadius + spikeLength)
+                let tipY = center.y + sin(angle) * (bodyRadius + spikeLength)
+
+                let stalk = UIBezierPath()
+                stalk.move(to: CGPoint(x: baseX, y: baseY))
+                stalk.addLine(to: CGPoint(x: tipX, y: tipY))
+                stalk.lineWidth = 3.5
+                UIColor(red: 0.55, green: 0.1, blue: 0.14, alpha: 1).setStroke()
+                stalk.stroke()
+
+                let head = UIBezierPath(ovalIn: CGRect(x: tipX - spikeHeadRadius, y: tipY - spikeHeadRadius,
+                                                        width: spikeHeadRadius * 2, height: spikeHeadRadius * 2))
+                UIColor(red: 0.75, green: 0.15, blue: 0.2, alpha: 1).setFill()
+                head.fill()
             }
-            path.close()
+
+            // Cell body — mottled sphere with a radial gradient for depth.
+            let bodyRect = CGRect(x: center.x - bodyRadius, y: center.y - bodyRadius,
+                                   width: bodyRadius * 2, height: bodyRadius * 2)
+            let bodyPath = UIBezierPath(ovalIn: bodyRect)
 
             let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                       colors: [UIColor(red: 0.35, green: 0.05, blue: 0.08, alpha: 1).cgColor,
-                                                UIColor(red: 0.10, green: 0.01, blue: 0.02, alpha: 1).cgColor] as CFArray,
+                                       colors: [UIColor(red: 0.55, green: 0.08, blue: 0.12, alpha: 1).cgColor,
+                                                UIColor(red: 0.15, green: 0.02, blue: 0.04, alpha: 1).cgColor] as CFArray,
                                        locations: [0, 1])!
             cgCtx.saveGState()
-            path.addClip()
+            bodyPath.addClip()
             cgCtx.drawRadialGradient(gradient,
-                                      startCenter: center, startRadius: 4,
-                                      endCenter: center, endRadius: outerRadius,
+                                      startCenter: CGPoint(x: center.x - 6, y: center.y + 6), startRadius: 2,
+                                      endCenter: center, endRadius: bodyRadius,
                                       options: [])
             cgCtx.restoreGState()
 
-            UIColor.red.withAlphaComponent(0.7).setStroke()
-            path.lineWidth = 2
-            path.stroke()
+            UIColor(red: 0.85, green: 0.2, blue: 0.25, alpha: 0.6).setStroke()
+            bodyPath.lineWidth = 2
+            bodyPath.stroke()
 
-            // Glowing eyes.
-            for dx: CGFloat in [-10, 10] {
-                let eyeRect = CGRect(x: center.x + dx - 5, y: center.y + 4, width: 10, height: 10)
-                UIColor(red: 1, green: 0.15, blue: 0.15, alpha: 1).setFill()
+            // A few small membrane blemishes for texture.
+            for _ in 0..<5 {
+                let dotRadius = CGFloat.random(in: 1.5...3)
+                let dotAngle = CGFloat.random(in: 0...(.pi * 2))
+                let dotDistance = CGFloat.random(in: 4...(bodyRadius - 6))
+                let dotX = center.x + cos(dotAngle) * dotDistance
+                let dotY = center.y + sin(dotAngle) * dotDistance
+                let dot = UIBezierPath(ovalIn: CGRect(x: dotX - dotRadius, y: dotY - dotRadius,
+                                                       width: dotRadius * 2, height: dotRadius * 2))
+                UIColor.black.withAlphaComponent(0.2).setFill()
+                dot.fill()
+            }
+
+            // Glowing eyes so it still reads as a character, not just a germ.
+            for dx: CGFloat in [-8, 8] {
+                let eyeRect = CGRect(x: center.x + dx - 4, y: center.y + 2, width: 8, height: 8)
+                UIColor(red: 1, green: 0.2, blue: 0.2, alpha: 1).setFill()
                 UIBezierPath(ovalIn: eyeRect).fill()
                 UIColor.white.withAlphaComponent(0.9).setFill()
-                UIBezierPath(ovalIn: eyeRect.insetBy(dx: 3, dy: 3)).fill()
+                UIBezierPath(ovalIn: eyeRect.insetBy(dx: 2.5, dy: 2.5)).fill()
             }
         }
         return SKTexture(image: image)
     }
 
-    /// Draws a RAM chip — a little green circuit-board square,
-    /// unmistakably "a piece of computer memory".
     private func ramTexture() -> SKTexture {
         let size = CGSize(width: 32, height: 32)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -406,7 +587,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             chipPath.lineWidth = 2
             chipPath.stroke()
 
-            // Little contact pins on each side.
             UIColor(red: 0.85, green: 1.0, blue: 0.85, alpha: 1).setFill()
             for i in 0..<4 {
                 let x = chipRect.minX + 3 + CGFloat(i) * 5
@@ -414,7 +594,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
                 cgCtx.fill(CGRect(x: x, y: chipRect.maxY, width: 2, height: 3))
             }
 
-            // Circuit line detail.
             let linePath = UIBezierPath()
             linePath.move(to: CGPoint(x: chipRect.minX + 4, y: chipRect.midY))
             linePath.addLine(to: CGPoint(x: chipRect.maxX - 4, y: chipRect.midY))
@@ -445,7 +624,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     }
 
     private func createModernBackground() {
-        // Soft vertical gradient panel behind everything for depth.
         let gradientTexture = verticalGradientTexture(
             top: UIColor(red: 0.05, green: 0.04, blue: 0.14, alpha: 1),
             bottom: UIColor(red: 0.01, green: 0.01, blue: 0.03, alpha: 1),
@@ -455,7 +633,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         backdrop.zPosition = -101
         backgroundNode.addChild(backdrop)
 
-        // Perspective road lanes glowing gently.
         for lane in lanes {
             let line = SKShapeNode()
             let linePath = CGMutablePath()
@@ -468,7 +645,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             backgroundNode.addChild(line)
         }
 
-        // Scrolling grid to sell the sense of speed.
         let grid = SKNode()
         backgroundNode.addChild(grid)
         for y in stride(from: -size.height, through: size.height, by: 60) {
@@ -481,18 +657,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             line.lineWidth = 1
             grid.addChild(line)
         }
-        let scroll = SKAction.repeatForever(
-            SKAction.sequence([
-                SKAction.moveBy(x: 0, y: -60, duration: 0.6),
-                SKAction.run { [weak self] in
-                    // handled by gameSpeed via updateBackgroundScroll()
-                    _ = self
-                }
-            ])
-        )
-        grid.run(scroll, withKey: "gridScroll")
 
-        // Drifting ambient particles (dust/snow-like) for atmosphere.
         for _ in 0..<18 {
             let dot = SKShapeNode(circleOfRadius: CGFloat.random(in: 1...2.4))
             dot.fillColor = UIColor.cyan.withAlphaComponent(CGFloat.random(in: 0.05...0.18))
@@ -531,20 +696,19 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private func setupPlayer() {
         player = SKNode()
         player.name = "player"
-        player.position = CGPoint(x: lanes[currentLane], y: -170)
+        player.position = CGPoint(x: lanes[currentLane], y: playerBaseY)
         player.zPosition = 20
         worldNode.addChild(player)
 
-        // Soft contact shadow sells "grounded" without needing a floor sprite.
-        playerShadow = SKShapeNode(ellipseOf: CGSize(width: 40, height: 12))
+        playerShadow = SKShapeNode(ellipseOf: CGSize(width: 40 * contentScale, height: 12 * contentScale))
         playerShadow.fillColor = UIColor.black.withAlphaComponent(0.35)
         playerShadow.strokeColor = .clear
-        playerShadow.position = CGPoint(x: 0, y: -30)
+        playerShadow.position = CGPoint(x: 0, y: -30 * contentScale)
         playerShadow.zPosition = -1
         player.addChild(playerShadow)
 
         playerGlow = SKSpriteNode(texture: glowTexture(color: .cyan, diameter: 140))
-        playerGlow.size = CGSize(width: 110, height: 110)
+        playerGlow.size = CGSize(width: 110 * contentScale, height: 110 * contentScale)
         playerGlow.zPosition = -0.5
         player.addChild(playerGlow)
         playerGlow.run(SKAction.repeatForever(
@@ -558,11 +722,10 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             playerCore = sprite
         } else {
             playerCore = SKSpriteNode(texture: playerTexture())
-            playerCore.size = CGSize(width: 48, height: 48)
         }
+        playerCore.size = CGSize(width: 48 * contentScale, height: 48 * contentScale)
         player.addChild(playerCore)
 
-        // Subtle running bob so the character feels alive even standing still.
         playerCore.run(SKAction.repeatForever(
             SKAction.sequence([
                 SKAction.moveBy(x: 0, y: 4, duration: 0.22),
@@ -570,10 +733,11 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             ])
         ), withKey: "bob")
 
-        let body = SKPhysicsBody(rectangleOf: CGSize(width: 48, height: 48))
+        let body = SKPhysicsBody(rectangleOf: CGSize(width: 48 * contentScale, height: 48 * contentScale))
         body.isDynamic = true
         body.categoryBitMask = PhysicsCategory.player
         body.contactTestBitMask = PhysicsCategory.ram | PhysicsCategory.powerUp
+            | PhysicsCategory.projectile | PhysicsCategory.jigarBody
         body.collisionBitMask = PhysicsCategory.none
         player.physicsBody = body
     }
@@ -585,12 +749,12 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private func setupJigar() {
         jigar = SKNode()
         jigar.name = "jigar"
-        jigar.position = CGPoint(x: lanes[currentLane], y: -430)
+        jigar.position = CGPoint(x: lanes[currentLane], y: playerBaseY - maxVisualGap)
         jigar.zPosition = 15
         worldNode.addChild(jigar)
 
         jigarGlow = SKSpriteNode(texture: glowTexture(color: .red, diameter: 160))
-        jigarGlow.size = CGSize(width: 130, height: 130)
+        jigarGlow.size = CGSize(width: 130 * contentScale, height: 130 * contentScale)
         jigarGlow.zPosition = -0.5
         jigar.addChild(jigarGlow)
         jigarGlow.run(SKAction.repeatForever(
@@ -604,8 +768,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             jigarCore = sprite
         } else {
             jigarCore = SKSpriteNode(texture: jigarTexture())
-            jigarCore.size = CGSize(width: 64, height: 64)
         }
+        jigarCore.size = CGSize(width: 68 * contentScale, height: 68 * contentScale)
         jigar.addChild(jigarCore)
 
         jigarCore.run(SKAction.repeatForever(
@@ -615,6 +779,29 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
                 SKAction.rotate(byAngle: 0.06, duration: 0.15)
             ])
         ), withKey: "menace")
+
+        // Real physics body on Jigar itself: touching it is now a
+        // distinct, instant-death event, separate from the Health bar.
+        let body = SKPhysicsBody(circleOfRadius: 26 * contentScale)
+        body.isDynamic = false
+        body.categoryBitMask = PhysicsCategory.jigarBody
+        body.contactTestBitMask = PhysicsCategory.player
+        body.collisionBitMask = PhysicsCategory.none
+        jigar.physicsBody = body
+    }
+
+    private func applyEquippedSkins() {
+        let meta = MetaProgress.shared
+        let pSkin = playerSkins.first(where: { $0.id == meta.equippedPlayerSkin }) ?? playerSkins[0]
+        let jSkin = jigarSkins.first(where: { $0.id == meta.equippedJigarSkin }) ?? jigarSkins[0]
+
+        playerCore.color = pSkin.color
+        playerCore.colorBlendFactor = pSkin.id == "default" ? 0 : 0.6
+        playerGlow.texture = glowTexture(color: pSkin.color, diameter: 140)
+
+        jigarCore.color = jSkin.color
+        jigarCore.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+        jigarGlow.texture = glowTexture(color: jSkin.color, diameter: 160)
     }
 
     // =================================================================
@@ -627,11 +814,10 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     }
 
     // =================================================================
-    // MARK: - UI
+    // MARK: - In-Run UI
     // =================================================================
 
     private func setupUI() {
-        // --- RAM counter + progress bar toward next power-up ---
         ramLabel = makeLabel(text: "RAM 0 / 10", size: 20, color: .white)
         ramLabel.horizontalAlignmentMode = .left
         ramLabel.position = CGPoint(x: -size.width / 2 + 24, y: size.height / 2 - 50)
@@ -646,26 +832,35 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         ramProgressFill.xScale = 0
         uiNode.addChild(ramProgressFill)
 
-        // --- Jigar proximity meter (color shifts green -> red) ---
-        jigarDistanceLabel = makeLabel(text: "JIGAR 260m", size: 14, color: .white)
-        jigarDistanceLabel.position = CGPoint(x: 0, y: size.height / 2 - 50)
-        uiNode.addChild(jigarDistanceLabel)
+        // --- Vertical Jigar Health bar, top-right ---
+        let barX = size.width / 2 - 30
+        let barTopY = size.height / 2 - 60
 
-        jigarProximityBar = roundedBar(width: 130, height: 10, color: UIColor.white.withAlphaComponent(0.12))
-        jigarProximityBar.position = CGPoint(x: 0, y: size.height / 2 - 68)
-        uiNode.addChild(jigarProximityBar)
+        jigarHealthTitle = makeLabel(text: "JIGAR", size: 12, color: .red)
+        jigarHealthTitle.position = CGPoint(x: barX, y: barTopY + 14)
+        uiNode.addChild(jigarHealthTitle)
 
-        jigarProximityFill = roundedBar(width: 130, height: 10, color: .red)
-        jigarProximityFill.position = jigarProximityBar.position
-        uiNode.addChild(jigarProximityFill)
+        jigarHealthBarBack = SKShapeNode(rectOf: CGSize(width: 18, height: jigarHealthBarHeight), cornerRadius: 9)
+        jigarHealthBarBack.fillColor = UIColor.white.withAlphaComponent(0.12)
+        jigarHealthBarBack.strokeColor = UIColor.white.withAlphaComponent(0.25)
+        jigarHealthBarBack.position = CGPoint(x: barX, y: barTopY - jigarHealthBarHeight / 2)
+        uiNode.addChild(jigarHealthBarBack)
 
-        // --- Combo label (fun feedback for quick chained pickups) ---
+        jigarHealthBarFill = SKShapeNode(rectOf: CGSize(width: 18, height: jigarHealthBarHeight), cornerRadius: 9)
+        jigarHealthBarFill.fillColor = .green
+        jigarHealthBarFill.strokeColor = .clear
+        jigarHealthBarFill.position = jigarHealthBarBack.position
+        uiNode.addChild(jigarHealthBarFill)
+
+        jigarHealthValueLabel = makeLabel(text: "100", size: 12, color: .white)
+        jigarHealthValueLabel.position = CGPoint(x: barX, y: barTopY - jigarHealthBarHeight - 16)
+        uiNode.addChild(jigarHealthValueLabel)
+
         comboLabel = makeLabel(text: "", size: 16, color: .yellow)
         comboLabel.position = CGPoint(x: 0, y: 60)
         comboLabel.isHidden = true
         uiNode.addChild(comboLabel)
 
-        // --- Power-up badge (icon + name inside a rounded pill) ---
         powerUpBadge = SKNode()
         powerUpBadge.position = CGPoint(x: 0, y: -size.height / 2 + 55)
         powerUpBadge.isHidden = true
@@ -703,11 +898,11 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             ])
         ))
 
-        // --- Pause button, top-right corner ---
+        // Pause button moved to top-left (top-right is now the Health bar).
         pauseButton = SKShapeNode(circleOfRadius: 18)
         pauseButton.fillColor = UIColor.black.withAlphaComponent(0.35)
         pauseButton.strokeColor = UIColor.white.withAlphaComponent(0.4)
-        pauseButton.position = CGPoint(x: size.width / 2 - 34, y: size.height / 2 - 50)
+        pauseButton.position = CGPoint(x: -size.width / 2 + 34, y: size.height / 2 - 100)
         pauseButton.name = "pauseButton"
         pauseButton.isHidden = true
         uiNode.addChild(pauseButton)
@@ -741,18 +936,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let clamped = max(0, min(progress, 1))
         ramProgressFill.run(SKAction.scaleX(to: clamped, duration: 0.2))
 
-        jigarDistanceLabel.text = "JIGAR  \(Int(jigarDistance))m"
-
-        let proximity = 1 - (jigarDistance / startingJigarDistance) // 0 = safe, 1 = caught
-        let danger = max(0, min(proximity, 1))
-        jigarProximityFill.run(SKAction.scaleX(to: max(0.02, 1 - danger), duration: 0.1))
-        jigarProximityFill.fillColor = dangerColor(for: danger)
-
-        if danger > 0.75 {
-            jigarDistanceLabel.fontColor = UIColor(red: 1, green: 0.25, blue: 0.25, alpha: 1)
-        } else {
-            jigarDistanceLabel.fontColor = .white
-        }
+        updateJigarHealthBar()
 
         if let powerUp = availablePowerUp {
             powerUpIconLabel.text = powerUp.glyph
@@ -764,16 +948,31 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         }
     }
 
-    /// Smoothly blends green -> yellow -> red as Jigar gets closer.
+    /// Updates the vertical Health bar. Full (100) = green/safe,
+    /// empty (0) = red/caught. The fill shrinks from the bar's
+    /// center, matching the style of the other progress bars.
+    private func updateJigarHealthBar() {
+        guard jigarHealthBarFill != nil else { return }
+
+        let healthFraction = max(0, min(jigarHealth / 100, 1))
+        jigarHealthBarFill.run(SKAction.scaleY(to: max(0.02, healthFraction), duration: 0.1))
+
+        let danger = 1 - healthFraction
+        jigarHealthBarFill.fillColor = dangerColor(for: danger)
+
+        jigarHealthValueLabel.text = "\(Int(jigarHealth))"
+        jigarHealthValueLabel.fontColor = danger > 0.75
+            ? UIColor(red: 1, green: 0.25, blue: 0.25, alpha: 1)
+            : .white
+    }
+
     private func dangerColor(for t: CGFloat) -> UIColor {
         if t < 0.5 {
-            let local = t / 0.5
             return blend(UIColor(red: 0.3, green: 1.0, blue: 0.4, alpha: 1),
-                          UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1), local)
+                          UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1), t / 0.5)
         } else {
-            let local = (t - 0.5) / 0.5
             return blend(UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1),
-                          UIColor(red: 1.0, green: 0.2, blue: 0.25, alpha: 1), local)
+                          UIColor(red: 1.0, green: 0.2, blue: 0.25, alpha: 1), (t - 0.5) / 0.5)
         }
     }
 
@@ -782,10 +981,261 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
         a.getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
         b.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        return UIColor(red: r1 + (r2 - r1) * t,
-                        green: g1 + (g2 - g1) * t,
-                        blue: b1 + (b2 - b1) * t,
-                        alpha: 1)
+        return UIColor(red: r1 + (r2 - r1) * t, green: g1 + (g2 - g1) * t, blue: b1 + (b2 - b1) * t, alpha: 1)
+    }
+
+    private func makeLabel(text: String, size: CGFloat, color: UIColor) -> SKLabelNode {
+        let label = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        label.text = text
+        label.fontSize = size
+        label.fontColor = color
+        return label
+    }
+
+    private func makeButton(text: String, name: String, width: CGFloat, height: CGFloat = 52,
+                             fill: UIColor, textColor: UIColor = .white, fontSize: CGFloat = 18) -> SKShapeNode {
+        let button = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: height / 2)
+        button.fillColor = fill
+        button.strokeColor = UIColor.white.withAlphaComponent(0.35)
+        button.lineWidth = 1.5
+        button.name = name
+
+        let label = makeLabel(text: text, size: fontSize, color: textColor)
+        label.verticalAlignmentMode = .center
+        label.name = name
+        button.addChild(label)
+
+        return button
+    }
+
+    // =================================================================
+    // MARK: - Main Menu
+    // =================================================================
+
+    private func buildMenuContent() {
+        menuNode.removeAllChildren()
+        let meta = MetaProgress.shared
+
+        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 36, height: 460), cornerRadius: 26)
+        panel.fillColor = UIColor.black.withAlphaComponent(0.42)
+        panel.strokeColor = UIColor.cyan.withAlphaComponent(0.25)
+        panel.lineWidth = 1.5
+        menuNode.addChild(panel)
+
+        let title = makeLabel(text: "RUN FROM JIGAR", size: 30, color: .white)
+        title.position = CGPoint(x: 0, y: 195)
+        menuNode.addChild(title)
+        title.run(SKAction.repeatForever(
+            SKAction.sequence([
+                SKAction.colorize(with: .cyan, colorBlendFactor: 0.5, duration: 1.2),
+                SKAction.colorize(with: .white, colorBlendFactor: 0, duration: 1.2)
+            ])
+        ))
+
+        let subtitle = makeLabel(text: "STEAL BACK THE RAM", size: 14, color: .green)
+        subtitle.position = CGPoint(x: 0, y: 168)
+        menuNode.addChild(subtitle)
+
+        let pSkin = playerSkins.first(where: { $0.id == meta.equippedPlayerSkin }) ?? playerSkins[0]
+        let jSkin = jigarSkins.first(where: { $0.id == meta.equippedJigarSkin }) ?? jigarSkins[0]
+
+        let previewPlayer = SKSpriteNode(texture: playerTexture())
+        previewPlayer.size = CGSize(width: 54, height: 54)
+        previewPlayer.color = pSkin.color
+        previewPlayer.colorBlendFactor = pSkin.id == "default" ? 0 : 0.6
+        previewPlayer.position = CGPoint(x: -45, y: 110)
+        menuNode.addChild(previewPlayer)
+
+        let previewJigar = SKSpriteNode(texture: jigarTexture())
+        previewJigar.size = CGSize(width: 62, height: 62)
+        previewJigar.color = jSkin.color
+        previewJigar.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+        previewJigar.position = CGPoint(x: 45, y: 110)
+        menuNode.addChild(previewJigar)
+
+        let statsY: CGFloat = 55
+        addStat(to: menuNode, title: "LEVEL", value: "\(meta.level)", x: -100, y: statsY, color: .cyan)
+        addStat(to: menuNode, title: "TOTAL RAM", value: "\(meta.totalRAM)", x: 0, y: statsY, color: .green)
+        addStat(to: menuNode, title: "BEST RUN", value: "\(meta.bestRun)", x: 100, y: statsY, color: .yellow)
+
+        let levelBarBack = roundedBar(width: 220, height: 8, color: UIColor.white.withAlphaComponent(0.12))
+        levelBarBack.position = CGPoint(x: 0, y: statsY - 30)
+        menuNode.addChild(levelBarBack)
+        let levelBarFill = roundedBar(width: 220, height: 8, color: .cyan)
+        levelBarFill.position = levelBarBack.position
+        levelBarFill.xScale = max(0.02, meta.levelProgress)
+        menuNode.addChild(levelBarFill)
+
+        let playButton = makeButton(text: "▶  PLAY", name: "menuPlay", width: 240,
+                                     fill: UIColor(red: 0.15, green: 0.75, blue: 0.35, alpha: 0.9))
+        playButton.position = CGPoint(x: 0, y: -30)
+        menuNode.addChild(playButton)
+
+        let garageButton = makeButton(text: "🎨  GARAGE (SKINS & SHOP)", name: "menuGarage", width: 240,
+                                       fill: UIColor(red: 0.55, green: 0.2, blue: 0.85, alpha: 0.9), fontSize: 14)
+        garageButton.position = CGPoint(x: 0, y: -95)
+        menuNode.addChild(garageButton)
+
+        let howToButton = makeButton(text: "❓  HOW TO PLAY", name: "menuHowTo", width: 240,
+                                      fill: UIColor.white.withAlphaComponent(0.12), fontSize: 15)
+        howToButton.position = CGPoint(x: 0, y: -160)
+        menuNode.addChild(howToButton)
+    }
+
+    private func addStat(to parent: SKNode, title: String, value: String, x: CGFloat, y: CGFloat, color: UIColor) {
+        let valueLabel = makeLabel(text: value, size: 22, color: color)
+        valueLabel.position = CGPoint(x: x, y: y)
+        parent.addChild(valueLabel)
+
+        let titleLabel = makeLabel(text: title, size: 10, color: .white)
+        titleLabel.alpha = 0.6
+        titleLabel.position = CGPoint(x: x, y: y - 20)
+        parent.addChild(titleLabel)
+    }
+
+    // =================================================================
+    // MARK: - Garage (Customize + Shop)
+    // =================================================================
+
+    private func buildGarageContent() {
+        garageNode.removeAllChildren()
+        let meta = MetaProgress.shared
+
+        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 24, height: 520), cornerRadius: 26)
+        panel.fillColor = UIColor.black.withAlphaComponent(0.5)
+        panel.strokeColor = UIColor.purple.withAlphaComponent(0.3)
+        panel.lineWidth = 1.5
+        garageNode.addChild(panel)
+
+        let title = makeLabel(text: "GARAGE", size: 26, color: .white)
+        title.position = CGPoint(x: 0, y: 235)
+        garageNode.addChild(title)
+
+        let ramBalance = makeLabel(text: "💰 \(meta.totalRAM) RAM", size: 16, color: .green)
+        ramBalance.position = CGPoint(x: 0, y: 205)
+        garageNode.addChild(ramBalance)
+
+        let hint = makeLabel(text: "TAP TO EQUIP · LOCKED = TAP TO BUY", size: 10, color: .white)
+        hint.alpha = 0.55
+        hint.position = CGPoint(x: 0, y: 185)
+        garageNode.addChild(hint)
+
+        let runnerLabel = makeLabel(text: "RUNNER SKINS", size: 14, color: .cyan)
+        runnerLabel.position = CGPoint(x: 0, y: 140)
+        garageNode.addChild(runnerLabel)
+        buildSkinRow(skins: playerSkins,
+                     unlocked: meta.unlockedPlayerSkins,
+                     equipped: meta.equippedPlayerSkin,
+                     namePrefix: "playerSkin_",
+                     y: 90)
+
+        let jigarLabel = makeLabel(text: "VIRUS SKINS", size: 14, color: .red)
+        jigarLabel.position = CGPoint(x: 0, y: 15)
+        garageNode.addChild(jigarLabel)
+        buildSkinRow(skins: jigarSkins,
+                     unlocked: meta.unlockedJigarSkins,
+                     equipped: meta.equippedJigarSkin,
+                     namePrefix: "jigarSkin_",
+                     y: -35)
+
+        let warning = makeLabel(text: "NOT ENOUGH RAM", size: 14, color: .red)
+        warning.name = "garageWarning"
+        warning.alpha = 0
+        warning.position = CGPoint(x: 0, y: -110)
+        garageNode.addChild(warning)
+
+        let backButton = makeButton(text: "◀  BACK TO MENU", name: "garageBack", width: 220,
+                                     fill: UIColor.white.withAlphaComponent(0.12), fontSize: 15)
+        backButton.position = CGPoint(x: 0, y: -220)
+        garageNode.addChild(backButton)
+    }
+
+    private func buildSkinRow(skins: [SkinOption], unlocked: Set<String>, equipped: String, namePrefix: String, y: CGFloat) {
+        let spacing: CGFloat = 62
+        let startX = -CGFloat(skins.count - 1) * spacing / 2
+
+        for (index, skin) in skins.enumerated() {
+            let x = startX + CGFloat(index) * spacing
+            let isUnlocked = unlocked.contains(skin.id)
+            let isEquipped = skin.id == equipped
+
+            let swatch = SKShapeNode(circleOfRadius: 24)
+            swatch.name = namePrefix + skin.id
+            swatch.fillColor = isUnlocked ? skin.color : skin.color.withAlphaComponent(0.25)
+            swatch.strokeColor = isEquipped ? .white : UIColor.white.withAlphaComponent(0.2)
+            swatch.lineWidth = isEquipped ? 3 : 1
+            swatch.position = CGPoint(x: x, y: y)
+            garageNode.addChild(swatch)
+
+            if isEquipped {
+                let check = makeLabel(text: "✓", size: 18, color: .white)
+                check.name = namePrefix + skin.id
+                check.verticalAlignmentMode = .center
+                check.position = CGPoint(x: x, y: y)
+                garageNode.addChild(check)
+            } else if !isUnlocked {
+                let lock = makeLabel(text: "🔒", size: 14, color: .white)
+                lock.name = namePrefix + skin.id
+                lock.verticalAlignmentMode = .center
+                lock.position = CGPoint(x: x, y: y)
+                garageNode.addChild(lock)
+            }
+
+            if !isUnlocked {
+                let costLabel = makeLabel(text: "\(skin.cost)", size: 10, color: .yellow)
+                costLabel.name = namePrefix + skin.id
+                costLabel.position = CGPoint(x: x, y: y - 36)
+                garageNode.addChild(costLabel)
+            }
+        }
+    }
+
+    private func selectPlayerSkin(_ id: String) {
+        guard let skin = playerSkins.first(where: { $0.id == id }) else { return }
+        let meta = MetaProgress.shared
+
+        if meta.unlockedPlayerSkins.contains(id) {
+            meta.equippedPlayerSkin = id
+            applyEquippedSkins()
+            buildGarageContent()
+        } else if meta.totalRAM >= skin.cost {
+            meta.totalRAM -= skin.cost
+            meta.unlockPlayerSkin(id)
+            meta.equippedPlayerSkin = id
+            applyEquippedSkins()
+            buildGarageContent()
+        } else {
+            flashInsufficientFunds()
+        }
+    }
+
+    private func selectJigarSkin(_ id: String) {
+        guard let skin = jigarSkins.first(where: { $0.id == id }) else { return }
+        let meta = MetaProgress.shared
+
+        if meta.unlockedJigarSkins.contains(id) {
+            meta.equippedJigarSkin = id
+            applyEquippedSkins()
+            buildGarageContent()
+        } else if meta.totalRAM >= skin.cost {
+            meta.totalRAM -= skin.cost
+            meta.unlockJigarSkin(id)
+            meta.equippedJigarSkin = id
+            applyEquippedSkins()
+            buildGarageContent()
+        } else {
+            flashInsufficientFunds()
+        }
+    }
+
+    private func flashInsufficientFunds() {
+        guard let warning = garageNode.childNode(withName: "garageWarning") else { return }
+        warning.removeAllActions()
+        warning.alpha = 1
+        warning.run(SKAction.sequence([
+            SKAction.wait(forDuration: 0.9),
+            SKAction.fadeOut(withDuration: 0.3)
+        ]))
     }
 
     // =================================================================
@@ -794,44 +1244,36 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
     private func setupTutorial() {
         tutorialNode = SKNode()
+        tutorialNode.zPosition = 210
         uiNode.addChild(tutorialNode)
 
-        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 40, height: 340), cornerRadius: 24)
+        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 40, height: 400), cornerRadius: 24)
         panel.fillColor = UIColor.black.withAlphaComponent(0.4)
         panel.strokeColor = UIColor.cyan.withAlphaComponent(0.25)
         panel.lineWidth = 1.5
-        panel.position = CGPoint(x: 0, y: 0)
         tutorialNode.addChild(panel)
 
-        let title = makeLabel(text: "RUN FROM JIGAR", size: 32, color: .white)
-        title.position = CGPoint(x: 0, y: 125)
+        let title = makeLabel(text: "HOW TO PLAY", size: 28, color: .white)
+        title.position = CGPoint(x: 0, y: 160)
         tutorialNode.addChild(title)
-        title.run(SKAction.repeatForever(
-            SKAction.sequence([
-                SKAction.colorize(with: .cyan, colorBlendFactor: 0.5, duration: 1.2),
-                SKAction.colorize(with: .white, colorBlendFactor: 0, duration: 1.2)
-            ])
-        ))
-
-        let subtitle = makeLabel(text: "STEAL BACK THE RAM", size: 16, color: .green)
-        subtitle.position = CGPoint(x: 0, y: 90)
-        tutorialNode.addChild(subtitle)
 
         let lines: [(String, UIColor, CGFloat)] = [
-            ("🧠 COLLECT RAM CHIPS", .green, 35),
-            ("⚡ EVERY 10 RAM = A RANDOM POWER-UP", .white, 5),
-            ("↔️ SWIPE LEFT / RIGHT TO CHANGE LANES", .cyan, -35),
-            ("⬆️ SWIPE UP TO USE YOUR POWER-UP", .yellow, -65),
-            ("👹 DON'T LET JIGAR CATCH YOU", .red, -95)
+            ("🧠 COLLECT RAM CHIPS", .green, 105),
+            ("⚡ EVERY 10 RAM = A RANDOM POWER-UP", .white, 70),
+            ("↔️ SWIPE LEFT / RIGHT TO CHANGE LANES", .cyan, 35),
+            ("⬆️ SWIPE UP TO USE YOUR POWER-UP", .yellow, 0),
+            ("🦠 TOUCHING THE VIRUS = INSTANT DEFEAT", .red, -35),
+            ("⚠️ IT ALSO FIRES SHOTS (4-15 DMG) — DODGE THEM", .orange, -70),
+            ("💚 YOUR HEALTH BAR IS TOP-RIGHT, OUT OF 100", .green, -105)
         ]
         for (text, color, y) in lines {
-            let label = makeLabel(text: text, size: 14, color: color)
+            let label = makeLabel(text: text, size: 12.5, color: color)
             label.position = CGPoint(x: 0, y: y)
             tutorialNode.addChild(label)
         }
 
         let start = makeLabel(text: "[ SWIPE UP TO START ]", size: 18, color: .green)
-        start.position = CGPoint(x: 0, y: -145)
+        start.position = CGPoint(x: 0, y: -170)
         tutorialNode.addChild(start)
 
         let pulse = SKAction.sequence([
@@ -847,43 +1289,54 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
     private func setupGameOver() {
         gameOverNode = SKNode()
+        gameOverNode.zPosition = 210
         uiNode.addChild(gameOverNode)
 
-        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 60, height: 260), cornerRadius: 24)
+        let panel = SKShapeNode(rectOf: CGSize(width: size.width - 60, height: 300), cornerRadius: 24)
         panel.fillColor = UIColor.black.withAlphaComponent(0.55)
         panel.strokeColor = UIColor.red.withAlphaComponent(0.35)
         panel.lineWidth = 1.5
         gameOverNode.addChild(panel)
 
-        let title = makeLabel(text: "JIGAR CAUGHT YOU", size: 28, color: .red)
-        title.position = CGPoint(x: 0, y: 85)
+        let title = makeLabel(text: "JIGAR CAUGHT YOU", size: 26, color: .red)
+        title.name = "gameOverTitle"
+        title.position = CGPoint(x: 0, y: 105)
         gameOverNode.addChild(title)
 
         let score = makeLabel(text: "", size: 20, color: .green)
         score.name = "finalScore"
-        score.position = CGPoint(x: 0, y: 40)
+        score.position = CGPoint(x: 0, y: 60)
         gameOverNode.addChild(score)
+
+        let banked = makeLabel(text: "", size: 14, color: .cyan)
+        banked.name = "bankedRAM"
+        banked.position = CGPoint(x: 0, y: 32)
+        gameOverNode.addChild(banked)
 
         let best = makeLabel(text: "", size: 16, color: .white)
         best.name = "finalBest"
-        best.position = CGPoint(x: 0, y: 10)
+        best.position = CGPoint(x: 0, y: 2)
         gameOverNode.addChild(best)
 
         let newBest = makeLabel(text: "🏆 NEW BEST!", size: 15, color: .yellow)
         newBest.name = "newBest"
-        newBest.position = CGPoint(x: 0, y: -20)
+        newBest.position = CGPoint(x: 0, y: -26)
         newBest.isHidden = true
         gameOverNode.addChild(newBest)
 
-        let restart = makeLabel(text: "[ SWIPE UP TO RUN AGAIN ]", size: 16, color: .white)
-        restart.position = CGPoint(x: 0, y: -80)
+        let restart = makeLabel(text: "[ SWIPE UP TO RUN AGAIN ]", size: 15, color: .white)
+        restart.position = CGPoint(x: 0, y: -85)
         gameOverNode.addChild(restart)
-
         let pulse = SKAction.sequence([
             SKAction.fadeAlpha(to: 0.3, duration: 0.5),
             SKAction.fadeAlpha(to: 1.0, duration: 0.5)
         ])
         restart.run(SKAction.repeatForever(pulse))
+
+        let menuButton = makeButton(text: "MENU", name: "gameOverMenu", width: 140, height: 40,
+                                     fill: UIColor.white.withAlphaComponent(0.12), fontSize: 14)
+        menuButton.position = CGPoint(x: 0, y: -130)
+        gameOverNode.addChild(menuButton)
     }
 
     // =================================================================
@@ -906,17 +1359,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         pauseNode.addChild(title)
 
         let resume = makeLabel(text: "[ TAP TO RESUME ]", size: 16, color: .cyan)
-        resume.name = "resumeLabel"
         resume.position = CGPoint(x: 0, y: -10)
         pauseNode.addChild(resume)
-    }
-
-    private func makeLabel(text: String, size: CGFloat, color: UIColor) -> SKLabelNode {
-        let label = SKLabelNode(fontNamed: "AvenirNext-Bold")
-        label.text = text
-        label.fontSize = size
-        label.fontColor = color
-        return label
     }
 
     // =================================================================
@@ -932,27 +1376,23 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         availablePowerUp = nil
         powerUpActive = false
 
-        jigarDistance = startingJigarDistance
-
+        jigarHealth = startingJigarHealth
         jigarFrozen = false
         jigarShielded = false
 
         currentLane = 1
         gameSpeed = 1.0
 
-        player.removeAction(forKey: "flash")
-        jigarCore.colorBlendFactor = 0
-        playerCore.colorBlendFactor = 0
-
         player.alpha = 1
         jigar.alpha = 1
 
-        player.position = CGPoint(x: lanes[currentLane], y: -170)
-        jigar.position = CGPoint(x: lanes[currentLane], y: -430)
+        player.position = CGPoint(x: lanes[currentLane], y: playerBaseY)
+        jigar.position = CGPoint(x: lanes[currentLane], y: playerBaseY - maxVisualGap)
 
         physicsWorld.speed = 1
         worldNode.isPaused = false
 
+        applyEquippedSkins()
         updateUI()
         startGameLoops()
     }
@@ -971,6 +1411,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let jigarUpdate = SKAction.run { [weak self] in self?.updateJigar() }
         let jigarWait = SKAction.wait(forDuration: 0.1)
         run(SKAction.repeatForever(SKAction.sequence([jigarUpdate, jigarWait])), withKey: "jigarLoop")
+
+        scheduleNextJigarShot()
     }
 
     // =================================================================
@@ -986,18 +1428,17 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             ram = sprite
         } else {
             ram = SKSpriteNode(texture: ramTexture())
-            ram.size = CGSize(width: 32, height: 32)
         }
+        ram.size = CGSize(width: 32 * contentScale, height: 32 * contentScale)
 
         ram.name = "ram"
         ram.position = CGPoint(x: lane, y: size.height / 2 + 40)
         ram.zPosition = 10
         worldNode.addChild(ram)
 
-        // Gentle idle spin makes the chip read as a collectible.
         ram.run(SKAction.repeatForever(SKAction.rotate(byAngle: .pi * 2, duration: 2.2)))
 
-        let body = SKPhysicsBody(circleOfRadius: 14)
+        let body = SKPhysicsBody(circleOfRadius: 14 * contentScale)
         body.isDynamic = false
         body.categoryBitMask = PhysicsCategory.ram
         body.contactTestBitMask = PhysicsCategory.player
@@ -1017,32 +1458,32 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     }
 
     // =================================================================
-    // MARK: - Jigar
+    // MARK: - Jigar Chase (Health drain)
     // =================================================================
 
     private func updateJigar() {
         guard gameState == .playing else { return }
 
         if !jigarFrozen {
-            let pressure = CGFloat.random(in: 0.25...0.8)
-            jigarDistance -= pressure
-            jigarDistance += 0.08 // small breathing room
+            let pressure = CGFloat.random(in: 0.1...0.32)
+            jigarHealth -= pressure
+            jigarHealth += 0.03 // tiny breathing room, same feel as before
         }
 
-        jigarDistance = max(0, min(jigarDistance, 400))
+        jigarHealth = max(0, min(jigarHealth, 100))
 
-        let visualY = -170 - jigarDistance
-        let targetPosition = CGPoint(x: player.position.x, y: visualY)
+        let visualGap = (jigarHealth / 100) * maxVisualGap
+        let targetPosition = CGPoint(x: player.position.x, y: playerBaseY - visualGap)
         jigar.run(SKAction.move(to: targetPosition, duration: 0.1), withKey: "jigarMovement")
 
         updateUI()
 
-        if jigarDistance <= 0 {
+        if jigarHealth <= 0 {
             if jigarShielded {
-                jigarDistance = 80
+                jigarHealth = 20
                 flashShieldBlock()
             } else {
-                triggerGameOver()
+                triggerGameOver(reason: "JIGAR CAUGHT YOU")
             }
         }
     }
@@ -1063,6 +1504,123 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             SKAction.removeFromParent()
         ]))
         shakeScreen(intensity: 6, duration: 0.15)
+    }
+
+    // =================================================================
+    // MARK: - Jigar Ranged Attack (chip damage, 4-15 per hit)
+    // =================================================================
+
+    private func scheduleNextJigarShot() {
+        guard gameState == .playing else { return }
+        let delay = Double.random(in: 2.5...5.0)
+        run(SKAction.sequence([
+            SKAction.wait(forDuration: delay),
+            SKAction.run { [weak self] in self?.telegraphAndShoot() }
+        ]), withKey: "jigarShotScheduler")
+    }
+
+    private func telegraphAndShoot() {
+        guard gameState == .playing else { return }
+
+        guard !jigarFrozen else {
+            scheduleNextJigarShot()
+            return
+        }
+
+        let laneX = jigar.position.x
+
+        let warning = makeLabel(text: "⚠️", size: 26, color: .orange)
+        warning.position = CGPoint(x: laneX, y: size.height / 2 - 110)
+        warning.zPosition = 90
+        worldNode.addChild(warning)
+        warning.run(SKAction.sequence([
+            SKAction.repeat(SKAction.sequence([
+                SKAction.fadeAlpha(to: 0.2, duration: 0.1),
+                SKAction.fadeAlpha(to: 1.0, duration: 0.1)
+            ]), count: 2),
+            SKAction.removeFromParent()
+        ]))
+
+        jigarCore.run(SKAction.sequence([
+            SKAction.run { [weak self] in
+                self?.jigarCore.color = .white
+                self?.jigarCore.colorBlendFactor = 0.85
+            },
+            SKAction.wait(forDuration: 0.2),
+            SKAction.run { [weak self] in
+                guard let self = self else { return }
+                let jSkin = jigarSkins.first(where: { $0.id == MetaProgress.shared.equippedJigarSkin }) ?? jigarSkins[0]
+                self.jigarCore.color = jSkin.color
+                self.jigarCore.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+            }
+        ]))
+
+        run(SKAction.sequence([
+            SKAction.wait(forDuration: 0.45),
+            SKAction.run { [weak self] in self?.fireJigarProjectile(laneX: laneX) }
+        ]))
+
+        scheduleNextJigarShot()
+    }
+
+    private func fireJigarProjectile(laneX: CGFloat) {
+        guard gameState == .playing else { return }
+
+        let projectile = SKShapeNode(circleOfRadius: 9 * contentScale)
+        projectile.name = "jigarProjectile"
+        projectile.fillColor = UIColor(red: 1, green: 0.25, blue: 0.25, alpha: 1)
+        projectile.strokeColor = .white
+        projectile.lineWidth = 1.5
+        projectile.glowWidth = 5
+        projectile.zPosition = 16
+        projectile.position = CGPoint(x: laneX, y: jigar.position.y + 25 * contentScale)
+        worldNode.addChild(projectile)
+
+        let body = SKPhysicsBody(circleOfRadius: 9 * contentScale)
+        body.isDynamic = false
+        body.categoryBitMask = PhysicsCategory.projectile
+        body.contactTestBitMask = PhysicsCategory.player
+        body.collisionBitMask = PhysicsCategory.none
+        projectile.physicsBody = body
+
+        let travel = SKAction.moveTo(y: size.height / 2 + 60, duration: 0.85)
+        let cleanup = SKAction.run { [weak projectile] in projectile?.removeFromParent() }
+        projectile.run(SKAction.sequence([travel, cleanup]))
+    }
+
+    /// A ranged hit chips a random 4–15 off the Health bar. It does
+    /// NOT instantly end the run — only a direct touch (see
+    /// didBegin/"jigar") or the bar hitting 0 does that.
+    private func handleProjectileHit(_ projectile: SKNode) {
+        projectile.removeFromParent()
+
+        if jigarShielded {
+            flashShieldBlock()
+            return
+        }
+
+        let damage = CGFloat(Int.random(in: 4...15))
+        jigarHealth = max(0, jigarHealth - damage)
+        showDamageNumber(damage)
+        updateUI()
+
+        if jigarHealth <= 0 {
+            triggerGameOver(reason: "JIGAR CAUGHT YOU")
+        }
+    }
+
+    private func showDamageNumber(_ amount: CGFloat) {
+        let label = makeLabel(text: "-\(Int(amount))", size: 16, color: .red)
+        label.position = CGPoint(x: size.width / 2 - 30, y: size.height / 2 - 60)
+        label.zPosition = 220
+        uiNode.addChild(label)
+        label.run(SKAction.sequence([
+            SKAction.group([
+                SKAction.moveBy(x: 0, y: 20, duration: 0.5),
+                SKAction.fadeOut(withDuration: 0.5)
+            ]),
+            SKAction.removeFromParent()
+        ]))
     }
 
     // =================================================================
@@ -1109,18 +1667,15 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         notification.position = CGPoint(x: -70, y: 0)
         container.addChild(notification)
 
-        let sequence = SKAction.sequence([
-            SKAction.group([
-                SKAction.scale(to: 1.0, duration: 0.25),
-            ]),
+        container.run(SKAction.sequence([
+            SKAction.scale(to: 1.0, duration: 0.25),
             SKAction.wait(forDuration: 1.1),
             SKAction.group([
                 SKAction.fadeOut(withDuration: 0.35),
                 SKAction.moveBy(x: 0, y: 20, duration: 0.35)
             ]),
             SKAction.removeFromParent()
-        ])
-        container.run(sequence)
+        ]))
     }
 
     // =================================================================
@@ -1144,8 +1699,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         case .freezeJigar: activateFreezeJigar()
         }
     }
-
-    // MARK: Speed Boost
 
     private func activateSpeedBoost() {
         gameSpeed = 2.0
@@ -1178,13 +1731,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         ghost.colorBlendFactor = 0.6
         ghost.zPosition = 18
         worldNode.addChild(ghost)
-        ghost.run(SKAction.sequence([
-            SKAction.fadeOut(withDuration: 0.3),
-            SKAction.removeFromParent()
-        ]))
+        ghost.run(SKAction.sequence([SKAction.fadeOut(withDuration: 0.3), SKAction.removeFromParent()]))
     }
-
-    // MARK: RAM Magnet
 
     private func activateRAMMagnet() {
         for ram in ramNodes where ram.parent != nil {
@@ -1201,8 +1749,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         }
     }
 
-    // MARK: Shield
-
     private func activateShield() {
         jigarShielded = true
 
@@ -1215,11 +1761,10 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         shield.glowWidth = 6
         player.addChild(shield)
 
-        let pulse = SKAction.sequence([
+        shield.run(SKAction.repeatForever(SKAction.sequence([
             SKAction.fadeAlpha(to: 0.4, duration: 0.3),
             SKAction.fadeAlpha(to: 1.0, duration: 0.3)
-        ])
-        shield.run(SKAction.repeatForever(pulse))
+        ])))
 
         run(SKAction.sequence([
             SKAction.wait(forDuration: 6),
@@ -1231,19 +1776,22 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         ]))
     }
 
-    // MARK: Jigar Attack
-
     private func activateJigarAttack() {
-        jigarDistance += 100
-        jigarDistance = min(jigarDistance, 400)
+        jigarHealth = min(jigarHealth + 25, 100)
 
-        let flashRed = SKAction.run { [weak self] in
-            self?.jigarCore.color = .white
-            self?.jigarCore.colorBlendFactor = 1.0
-        }
-        let wait = SKAction.wait(forDuration: 0.15)
-        let returnToNormal = SKAction.run { [weak self] in self?.jigarCore.colorBlendFactor = 0.0 }
-        jigar.run(SKAction.sequence([flashRed, wait, returnToNormal]))
+        jigar.run(SKAction.sequence([
+            SKAction.run { [weak self] in
+                self?.jigarCore.color = .white
+                self?.jigarCore.colorBlendFactor = 1.0
+            },
+            SKAction.wait(forDuration: 0.15),
+            SKAction.run { [weak self] in
+                guard let self = self else { return }
+                let jSkin = jigarSkins.first(where: { $0.id == MetaProgress.shared.equippedJigarSkin }) ?? jigarSkins[0]
+                self.jigarCore.color = jSkin.color
+                self.jigarCore.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+            }
+        ]))
 
         shakeScreen(intensity: 14, duration: 0.25)
 
@@ -1254,8 +1802,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         updateUI()
     }
 
-    // MARK: Freeze Jigar
-
     private func activateFreezeJigar() {
         jigarFrozen = true
         jigar.alpha = 0.45
@@ -1265,10 +1811,13 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         run(SKAction.sequence([
             SKAction.wait(forDuration: 5),
             SKAction.run { [weak self] in
-                self?.jigarFrozen = false
-                self?.jigar.alpha = 1.0
-                self?.jigarCore.colorBlendFactor = 0.0
-                self?.powerUpActive = false
+                guard let self = self else { return }
+                self.jigarFrozen = false
+                self.jigar.alpha = 1.0
+                let jSkin = jigarSkins.first(where: { $0.id == MetaProgress.shared.equippedJigarSkin }) ?? jigarSkins[0]
+                self.jigarCore.color = jSkin.color
+                self.jigarCore.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+                self.powerUpActive = false
             }
         ]))
     }
@@ -1296,17 +1845,55 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         let location = gesture.location(in: view)
         let scenePoint = convertPoint(fromView: location)
 
-        if gameState == .playing, pauseButton.contains(scenePoint) {
-            stateBeforePause = .playing
-            changeState(to: .paused)
-            return
-        }
-        if gameState == .paused {
+        switch gameState {
+
+        case .playing:
+            if pauseButton.contains(scenePoint) {
+                changeState(to: .paused)
+            }
+
+        case .paused:
             physicsWorld.speed = 1
             worldNode.isPaused = false
-            changeState(to: .playing == stateBeforePause ? .playing : .playing)
             pauseNode.isHidden = true
             gameState = .playing
+
+        case .menu:
+            for node in nodes(at: scenePoint) {
+                guard let name = node.name else { continue }
+                switch name {
+                case "menuPlay":  changeState(to: .playing)
+                case "menuHowTo": changeState(to: .tutorial)
+                case "menuGarage": changeState(to: .garage)
+                default: break
+                }
+            }
+
+        case .garage:
+            for node in nodes(at: scenePoint) {
+                guard let name = node.name else { continue }
+                if name == "garageBack" {
+                    changeState(to: .menu)
+                    return
+                } else if name.hasPrefix("playerSkin_") {
+                    selectPlayerSkin(String(name.dropFirst("playerSkin_".count)))
+                    return
+                } else if name.hasPrefix("jigarSkin_") {
+                    selectJigarSkin(String(name.dropFirst("jigarSkin_".count)))
+                    return
+                }
+            }
+
+        case .gameOver:
+            for node in nodes(at: scenePoint) {
+                if node.name == "gameOverMenu" {
+                    changeState(to: .menu)
+                    return
+                }
+            }
+
+        default:
+            break
         }
     }
 
@@ -1321,16 +1908,11 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         guard gameState == .playing else { return }
 
         switch gesture.direction {
-        case .left:
-            movePlayerLeft()
-        case .right:
-            movePlayerRight()
+        case .left:  movePlayerLeft()
+        case .right: movePlayerRight()
         case .up:
-            if availablePowerUp != nil {
-                usePowerUp()
-            }
-        default:
-            break
+            if availablePowerUp != nil { usePowerUp() }
+        default: break
         }
     }
 
@@ -1351,11 +1933,8 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     }
 
     private func movePlayerToCurrentLane(leaning: CGFloat) {
-        let movement = SKAction.moveTo(x: lanes[currentLane], duration: 0.15)
-        player.run(movement, withKey: "playerLaneMovement")
+        player.run(SKAction.moveTo(x: lanes[currentLane], duration: 0.15), withKey: "playerLaneMovement")
 
-        // Quick lean/tilt in the movement direction — small detail that
-        // makes the lane-change read as a physical dodge.
         let lean = SKAction.sequence([
             SKAction.rotate(toAngle: -leaning * 0.25, duration: 0.08),
             SKAction.rotate(toAngle: 0, duration: 0.12)
@@ -1384,8 +1963,26 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
         guard let node = otherBody?.node else { return }
 
-        if node.name == "ram" {
+        switch node.name {
+        case "ram":
             collectRAM(node)
+        case "jigarProjectile":
+            handleProjectileHit(node)
+        case "jigar":
+            handleDirectTouch()
+        default:
+            break
+        }
+    }
+
+    /// A direct touch against Jigar's own body — instant death,
+    /// independent of the Health bar (unless Shield is active).
+    private func handleDirectTouch() {
+        if jigarShielded {
+            flashShieldBlock()
+        } else {
+            shakeScreen(intensity: 22, duration: 0.3)
+            triggerGameOver(reason: "THE VIRUS GOT YOU")
         }
     }
 
@@ -1398,7 +1995,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         ramNodes.removeAll { $0 === ram }
 
         ramCount += 1
-        jigarDistance = min(jigarDistance + 2, 400)
+        jigarHealth = min(jigarHealth + 0.5, 100)
 
         updateCombo()
         checkForPowerUp()
@@ -1426,12 +2023,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
         comboLabel.run(SKAction.scale(to: 1.0, duration: 0.15))
     }
 
-    // =================================================================
-    // MARK: - RAM Collection Effect
-    // =================================================================
-
     private func createRAMCollectionEffect() {
-        // Ring burst.
         let flash = SKShapeNode(circleOfRadius: 10)
         flash.fillColor = .clear
         flash.strokeColor = .green
@@ -1447,7 +2039,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
             SKAction.removeFromParent()
         ]))
 
-        // Tiny particle sparks flying outward.
         for _ in 0..<6 {
             let spark = SKShapeNode(circleOfRadius: 2)
             spark.fillColor = UIColor(red: 0.5, green: 1, blue: 0.6, alpha: 1)
@@ -1504,36 +2095,47 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     // MARK: - Game Over
     // =================================================================
 
-    private func triggerGameOver() {
+    private func triggerGameOver(reason: String) {
         guard gameState == .playing else { return }
 
         shakeScreen(intensity: 20, duration: 0.3)
 
+        let meta = MetaProgress.shared
+        meta.totalRAM += ramCount
+
         var isNewBest = false
-        if ramCount > highScore {
-            highScore = ramCount
+        if ramCount > meta.bestRun {
+            meta.bestRun = ramCount
             isNewBest = true
-            UserDefaults.standard.set(highScore, forKey: "HighScoreRAM")
         }
 
+        if let title = gameOverNode.childNode(withName: "gameOverTitle") as? SKLabelNode {
+            title.text = reason
+        }
         if let finalScore = gameOverNode.childNode(withName: "finalScore") as? SKLabelNode {
             finalScore.text = "RAM COLLECTED: \(ramCount) MB"
         }
+        if let banked = gameOverNode.childNode(withName: "bankedRAM") as? SKLabelNode {
+            banked.text = "+\(ramCount) BANKED · TOTAL \(meta.totalRAM)"
+        }
         if let finalBest = gameOverNode.childNode(withName: "finalBest") as? SKLabelNode {
-            finalBest.text = "BEST: \(highScore) MB"
+            finalBest.text = "BEST: \(meta.bestRun) MB"
         }
         if let newBest = gameOverNode.childNode(withName: "newBest") as? SKLabelNode {
             newBest.isHidden = !isNewBest
         }
 
-        // Jigar "catches" the player with a quick color flash for clarity.
         jigarCore.run(SKAction.sequence([
             SKAction.run { [weak self] in
                 self?.jigarCore.color = .white
                 self?.jigarCore.colorBlendFactor = 1.0
             },
             SKAction.wait(forDuration: 0.1),
-            SKAction.run { [weak self] in self?.jigarCore.colorBlendFactor = 0 }
+            SKAction.run { [weak self] in
+                guard let self = self else { return }
+                let jSkin = jigarSkins.first(where: { $0.id == MetaProgress.shared.equippedJigarSkin }) ?? jigarSkins[0]
+                self.jigarCore.colorBlendFactor = jSkin.id == "default" ? 0 : 0.6
+            }
         ]))
 
         changeState(to: .gameOver)
@@ -1546,6 +2148,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     private func stopGame() {
         removeAction(forKey: "gameLoop")
         removeAction(forKey: "jigarLoop")
+        removeAction(forKey: "jigarShotScheduler")
     }
 
     // =================================================================
@@ -1553,7 +2156,7 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
     // =================================================================
 
     private func removeAllGameObjects() {
-        for node in worldNode.children where node.name == "ram" {
+        for node in worldNode.children where node.name == "ram" || node.name == "jigarProjectile" {
             node.removeAllActions()
             node.removeFromParent()
         }
@@ -1561,7 +2164,6 @@ class GameScene: SKScene, SKPhysicsContactDelegate {
 
         player.childNode(withName: "playerShield")?.removeFromParent()
 
-        // Clean up any leftover effect nodes from a previous run.
         for node in worldNode.children where node !== player && node !== jigar && node !== backgroundNode {
             if node.name == nil {
                 node.removeFromParent()
